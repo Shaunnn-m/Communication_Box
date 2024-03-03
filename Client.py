@@ -16,10 +16,10 @@ class ChatClient:
         self.client_socket.connect(self.server_address)
         self.username = None
         self.udp_port = random.randint(8000,15000)
-        self.udp_server = socket.socket(/socket.AF_INET, socket.SOCK_DGRAM)
+        self.udp_server = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.udp_server.bind(('localhost', self.udp_port))
         self.visibility = "y"  # Default visibility is True
-        self.MAX_SEGMENT = 500
+        self.MAX_SEGMENT = 1400
         self.file_data = {}
         self.messages = queue.Queue()
         self.currentstate = ""
@@ -29,25 +29,41 @@ class ChatClient:
             try:
                 readable, _, _ = select.select([self.udp_server], [], [], 0.1)
                 for sock in readable:
-
                     message, addr = sock.recvfrom(4096)
 
-                    file = message.decode()
-                    info = file.split(':')  # Adjusted to split correctly
-                    header = info[0]
+                    try:
+                        file = message.decode()
+                    except UnicodeDecodeError:
+                        print("Error decoding message. Skipping.")
+                        continue
 
+                    info = file.split(':')
+
+                    header = info[0]
                     if header == "FILE_INFO":
-                        Filename = info[1]
-                        data = info[2]
-                        file_name = Filename
-                        num_segments = int(data)
-                        self.file_data[file_name] = {'received_segments': 0, 'num_segments': num_segments, 'data': []}
+                        try:
+                            file_name, num_segments = info[1], int(info[2])
+                            self.file_data[file_name] = {'received_segments': 0, 'num_segments': num_segments, 'data': []}
+                        except ValueError:
+                            print("Invalid FILE_INFO format. Skipping.")
+                            continue
+                        except IndexError:
+                            print("Incomplete FILE_INFO message. Skipping.")
+                            continue
 
                     elif header == "SEGMENT":
+                        try:
+                            file_name = info[1]
+                            segment_num = int(info[2])
+                            # Reconstruct the binary data from the remaining part of the message
+                            data = message.decode()[len(header) + len(info[1]) + len(info[2]) + 3:]  # +3 for the three colons
+                            data = data.encode()
+                        except (ValueError, IndexError):
+                            print("Invalid SEGMENT format. Skipping.")
+                            continue
 
-                        data = data.encode()
                         if file_name in self.file_data:
-                            self.file_data[file_name]['data'].append((num_segments, data))
+                            self.file_data[file_name]['data'].append((segment_num, data))
                             self.file_data[file_name]['received_segments'] += 1
 
                             if self.file_data[file_name]['received_segments'] == self.file_data[file_name]['num_segments']:
@@ -55,19 +71,17 @@ class ChatClient:
                                 sorted_segments = sorted(self.file_data[file_name]['data'], key=lambda x: x[0])
                                 file_content = b''.join(segment[1] for segment in sorted_segments)
 
-                                with open(file_name, 'wb') as file:
-                                    file.write(file_content)
-                                print(f"File {file_name} received and assembled successfully.")
-                                del self.file_data[file_name]
+                                try:
+                                    with open(file_name, 'wb') as file:
+                                        file.write(file_content)
+                                    print(f"File {file_name} received and downloaded successfully.")
+                                    del self.file_data[file_name]
+                                except IOError as e:
+                                    print(f"Failed to write file {file_name}: {e}")
                         else:
                             print("Received segment for unknown file.")
-
-                    elif header != "FILE_INFO" and header != "SEGMENT":
-                        self.messages.put((message, addr))
                     else:
-                        pass
-
-
+                        self.messages.put((message, addr))
             except Exception as e:
                 traceback.print_exc()
 
@@ -107,7 +121,6 @@ class ChatClient:
                             self.messages.put((message.encode(), addr))
 
             except Exception as e:
-                traceback.print_exc()
                 print(f"Error broadcasting message: {e}")
 
 
@@ -124,26 +137,43 @@ class ChatClient:
         :param file_path: Path to the file to send.
         :param target_addr: Tuple containing the IP address and port of the receiver.
         """
-        file_size = os.path.getsize(file_path)
+        try:
+            file_size = os.path.getsize(file_path)
+        except OSError as e:
+            print(f"Error getting file size: {e}")
+            pass
+
         num_segments = math.ceil(file_size / self.MAX_SEGMENT)  # Calculate the number of segments needed
 
         # Send file info (e.g., name, number of segments) to receiver
         file_name = os.path.basename(file_path)
         file_info = f"FILE_INFO:{file_name}:{num_segments}"
-        self.udp_server.sendto(file_info.encode(), target_addr)
+        try:
+            self.udp_server.sendto(file_info.encode(), target_addr)
+        except socket.error as e:
+            print(f"Failed to send file info: {e}")
+            pass
 
         # Open the file and send it in segments
-        with open(file_path, 'rb') as file:
-            for segment_num in range(num_segments):
-                segment = file.read(self.MAX_SEGMENT)
+        try:
+            with open(file_path, 'rb') as file:
+                for segment_num in range(num_segments):
+                    segment = file.read(self.MAX_SEGMENT)
 
-                # Optionally prepend segment with its number for reassembly
-                data = f"SEGMENT:{file_name}:{segment_num}"
-                self.udp_server.sendto(data.encode(), target_addr)
+                    # Optionally prepend segment with its number for reassembly
+                    header = f"SEGMENT:{file_name}:{segment_num}:".encode()
+                    data = header + segment  # Concatenate bytes
 
+                    try:
+                        self.udp_server.sendto(data, target_addr)
+                    except socket.error as e:
+                        print(f"Failed to send file info: {e}")
+                        pass
                 # Implement acknowledgment reception and retransmission logic here, if needed
-
-        print(f"File {file_name} sent in {num_segments} segments.")
+        except OSError as e:
+            print(f"Error reading file: {e}")
+            pass
+        print(f"File {file_name} sent.")
 
     def list_online_users(self):
         self.client_socket.send("/list".encode())
@@ -187,15 +217,17 @@ class ChatClient:
 
 if __name__ == "__main__":
     client = ChatClient()
-    print("Connected to server.")
+    print("***********WELCOME TO CHATBOX***********")
 
     username = input("Username:\n")
-    visiblity = input("Do you want to be visible to other user y/n:\n")
+    visiblity = input("Do you want to be visible to other users yes(y)/no(n):\n")
 
-    if visiblity.lower() == "n":
+    if visiblity.lower() == "n" or visiblity.lower() == "no" :
         client.visibility = "n"
-    else:
+    elif visiblity.lower() == "y" or visiblity.lower() == "yes":
         client.visibility = "y"
+    else:
+        print("invalid option")
 
     receive_thread = threading.Thread(target=client.receive)
     broadcast_thread = threading.Thread(target=client.broadcast)
@@ -224,11 +256,13 @@ if __name__ == "__main__":
             client.connect_to_user(target_username)
             continue
         elif option == "3":
-            visible = input("Enter visibility y/n:\n")
-            if visible.lower() == "n":
-                    client.change_visibility("n")
+            visible = input("Enter visibility yes(Y)/no(N):\n")
+            if visible.lower() == "n" or visible.lower() == "no":
+                client.change_visibility("n")
+            elif visible.lower() == "y" or visible.lower() == "yes":
+                client.change_visibility("y")
             else:
-                    client.change_visibility("y")
+                print("invalid selection")
             continue
         elif option == "4":
             print("\nHelp:")
