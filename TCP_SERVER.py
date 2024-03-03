@@ -1,7 +1,7 @@
 import socket
 import threading
 import json
-import traceback
+
 
 
 class ChatServer:
@@ -54,7 +54,9 @@ class ChatServer:
                         self.connected_clients[username] = (IP_address, UDP_port, visibility)
 
         except Exception as e:
-            pass
+            if username and username in self.connected_clients:
+                del self.connected_clients[username]
+            print(f"Error or disconnection, removed client {username}.")
 
     def send_online_users(self, client_socket):
         visible_users = {username: data for username, data in self.connected_clients.items() if data[2] == "y"}  # Filter by visibility "y"
