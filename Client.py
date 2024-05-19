@@ -10,18 +10,18 @@ import math
 
 class ChatClient:
     def __init__(self):
-
-        self.server_address = ('localhost', 9799)
+        self.server_address = ('localhost', 9999)
         self.client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.client_socket.connect(self.server_address)
         self.username = None
-        self.udp_port = random.randint(8000,15000)
+        self.udp_port = random.randint(8000, 15000)
         self.udp_server = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.udp_server.bind(('localhost', self.udp_port))
         self.visibility = "y"  # Default visibility is True
         self.MAX_SEGMENT = 1400
         self.file_data = {}
         self.messages = queue.Queue()
+        self.message_store = {}  # Store messages for each user
         self.currentstate = ""
 
     def receive(self):
@@ -32,30 +32,26 @@ class ChatClient:
                     message, addr = sock.recvfrom(4096)
 
                     try:
-                        file = message.decode()
+                        decoded_message = message.decode()
                     except UnicodeDecodeError:
                         print("Error decoding message. Skipping.")
                         continue
 
-                    info = file.split(':')
-
+                    info = decoded_message.split(':')
                     header = info[0]
+
                     if header == "FILE_INFO":
                         try:
                             file_name, num_segments = info[1], int(info[2])
                             self.file_data[file_name] = {'received_segments': 0, 'num_segments': num_segments, 'data': []}
-                        except ValueError:
+                        except (ValueError, IndexError):
                             print("Invalid FILE_INFO format. Skipping.")
-                            continue
-                        except IndexError:
-                            print("Incomplete FILE_INFO message. Skipping.")
                             continue
 
                     elif header == "SEGMENT":
                         try:
                             file_name = info[1]
                             segment_num = int(info[2])
-                            # Reconstruct the binary data from the remaining part of the message
                             data = message.decode()[len(header) + len(info[1]) + len(info[2]) + 3:]  # +3 for the three colons
                             data = data.encode()
                         except (ValueError, IndexError):
@@ -81,7 +77,7 @@ class ChatClient:
                         else:
                             print("Received segment for unknown file.")
                     else:
-                        self.messages.put((message, addr))
+                        self.messages.put((decoded_message, addr))
             except Exception as e:
                 traceback.print_exc()
 
@@ -89,12 +85,10 @@ class ChatClient:
         while True:  # Keep broadcasting messages while the server is running
             try:
                 if not self.messages.empty():
-
                     message, addr = self.messages.get()
-                    message = message.decode()
-
                     actualMessage = message
                     oldOrNew = actualMessage[:3]
+                    username = actualMessage[3:].split(":")[0]
 
                     if oldOrNew == "New":
                         # Trim "New" out of the message
@@ -102,28 +96,22 @@ class ChatClient:
                         username = trimmedMessage[:trimmedMessage.index(":")]
 
                         if self.currentstate != username:
-
-
                             print("New message from " + username)
-
-                            self.messages.put((trimmedMessage.encode(), addr))
-
-                        else:
+                            if username not in self.message_store:
+                                self.message_store[username] = []
+                            self.message_store[username].append(trimmedMessage)
+                        elif self.currentstate == username:
                             print(f"{trimmedMessage}")
 
                     else:
-                        # If the message doesn't start with "New", just put it back in the queue
                         if self.currentstate == username:
-
                             print(f"{message}")
-
                         else:
-                            self.messages.put((message.encode(), addr))
-
+                            if username not in self.message_store:
+                                self.message_store[username] = []
+                            self.message_store[username].append(message)
             except Exception as e:
                 print(f"Error broadcasting message: {e}")
-
-
 
     def login(self, username, visibility):
         self.username = username
@@ -181,7 +169,7 @@ class ChatClient:
         online_users = json.loads(online_users_data)
         print("Online users:")
         for username, (IP_Adr, UDP_port, visibility) in online_users.items():
-            if (self.username != username and visibility):
+            if self.username != username and visibility:
                 print(username)
 
     def connect_to_user(self, target_username):
@@ -193,22 +181,24 @@ class ChatClient:
             print(f"Connected to {target_username} - IP: {target_info[0]}, UDP port: {target_info[1]}\nEnter @exit to quit/@file 'filename'.\n")
             self.currentstate = target_username
 
+            # Display stored messages from the target user
+            if target_username in self.message_store:
+                for msg in self.message_store[target_username]:
+                    print(f"{msg}")
 
             while True:
                 message = input("You: ")
-                if (message == "@exit"):
+                if message == "@exit":
                     self.currentstate = ""
                     break
-                elif (message.startswith("@file")):
+                elif message.startswith("@file"):
                     filename = message.split(" ")[1]
-                    self.send_file(filename,(target_info[0], target_info[1]))
+                    self.send_file(filename, (target_info[0], target_info[1]))
                 else:
                     message = f"New{self.username}: {message}"  # Include the state in the message
                     self.udp_server.sendto(message.encode(), (target_info[0], target_info[1]))  # Send message with state via UDP
-
         else:
-             print("User not found.")
-
+            print("User not found.")
 
     def change_visibility(self, visibility):
         self.visibility = visibility
@@ -220,11 +210,11 @@ if __name__ == "__main__":
     print("***********WELCOME TO CHATBOX***********")
 
     username = input("Username:\n")
-    visiblity = input("Do you want to be visible to other users yes(y)/no(n):\n")
+    visibility = input("Do you want to be visible to other users yes(y)/no(n):\n")
 
-    if visiblity.lower() == "n" or visiblity.lower() == "no" :
+    if visibility.lower() == "n" or visibility.lower() == "no":
         client.visibility = "n"
-    elif visiblity.lower() == "y" or visiblity.lower() == "yes":
+    elif visibility.lower() == "y" or visibility.lower() == "yes":
         client.visibility = "y"
     else:
         print("invalid option")
@@ -232,11 +222,10 @@ if __name__ == "__main__":
     receive_thread = threading.Thread(target=client.receive)
     broadcast_thread = threading.Thread(target=client.broadcast)
 
-
     receive_thread.start()
     broadcast_thread.start()
 
-    client.login(username, visiblity)  # Enter your desired username
+    client.login(username, visibility)  # Enter your desired username
 
     while True:
         print("\nAvailable Options:")
@@ -268,7 +257,7 @@ if __name__ == "__main__":
             print("\nHelp:")
             print("1. To list online users, simply choose option 1.")
             print("2. To connect to a user, choose option 2 and enter the username of the user you want to connect to.")
-            print("3. To change visibility, choose option 6 and enter 'True' or 'False' to set your visibility.")
+            print("3. To change visibility, choose option 3 and enter 'y' or 'n' to set your visibility.")
             print("4. Choose option 5 to exit the application.")
             continue
         elif option == "5":
